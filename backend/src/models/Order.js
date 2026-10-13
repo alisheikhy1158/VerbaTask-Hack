@@ -16,6 +16,8 @@ const orderSchema = new mongoose.Schema({
     trim: true,
     lowercase: true,
   },
+  customerId: { type: mongoose.Schema.Types.ObjectId, ref: 'Customer' },
+  customerName: { type: String, trim: true },
   source: { 
     type: String, 
     enum: ['guided', 'voice', 'dashboard', 'text'], 
@@ -25,7 +27,9 @@ const orderSchema = new mongoose.Schema({
     type: String, 
     enum: ['pending_approval', 'approved', 'completed', 'rejected'], 
     default: 'completed' 
-  }
+  },
+  staffName: { type: String, trim: true },
+  staffPhone: { type: String, trim: true },
 }, { 
   timestamps: true 
 });

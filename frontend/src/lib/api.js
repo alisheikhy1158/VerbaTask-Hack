@@ -1,9 +1,9 @@
 import { useAuthStore } from './store';
+import { API_BASE_URL } from './config';
 
-const BASE_URL = import.meta.env.VITE_API_BASE_URL || import.meta.env.VITE_API_URL || 'https://verbatask-production.up.railway.app';
+const BASE_URL = API_BASE_URL;
 
 async function request(path, options = {}) {
-  const url = path.startsWith('http') ? path : `${BASE_URL}${path.startsWith('/') ? path : `/${path}`}`;
   const token = useAuthStore.getState().token;
 
   const headers = {
@@ -21,11 +21,34 @@ async function request(path, options = {}) {
     config.body = JSON.stringify(config.body);
   }
 
+  const cleanPath = path.startsWith('/') ? path : `/${path}`;
+  const primaryUrl = path.startsWith('http') ? path : `${BASE_URL}${cleanPath}`;
+
+  // Fallback candidate if primary fails
+  let fallbackUrl = null;
+  if (!path.startsWith('http')) {
+    if (BASE_URL.startsWith('http')) {
+      fallbackUrl = cleanPath; // Same-origin via Netlify proxy
+    } else {
+      fallbackUrl = `https://verbatask-api.mshiraz.com${cleanPath}`;
+    }
+  }
+
   let response;
   try {
-    response = await fetch(url, config);
-  } catch (networkError) {
-    throw new Error('Network error. Please check your backend connection.', { cause: networkError });
+    response = await fetch(primaryUrl, config);
+  } catch (primaryError) {
+    if (fallbackUrl && fallbackUrl !== primaryUrl) {
+      try {
+        response = await fetch(fallbackUrl, config);
+      } catch (fallbackError) {
+        console.error(`[API] Both ${primaryUrl} and fallback ${fallbackUrl} failed:`, fallbackError);
+        throw new Error('Network error. Please check your backend connection.', { cause: fallbackError });
+      }
+    } else {
+      console.error(`[API] Fetch to ${primaryUrl} failed:`, primaryError);
+      throw new Error('Network error. Please check your backend connection.', { cause: primaryError });
+    }
   }
 
   let json;
@@ -52,6 +75,64 @@ async function request(path, options = {}) {
   return json?.data;
 }
 
+export async function downloadFile(path, filename) {
+  const token = useAuthStore.getState().token;
+  const cleanPath = path.startsWith('/') ? path : `/${path}`;
+  const primaryUrl = path.startsWith('http') ? path : `${BASE_URL}${cleanPath}`;
+  const headers = token ? { Authorization: `Bearer ${token}` } : {};
+
+  let fallbackUrl = null;
+  if (!path.startsWith('http')) {
+    if (BASE_URL.startsWith('http')) {
+      fallbackUrl = cleanPath; // Same-origin via Netlify proxy
+    } else {
+      fallbackUrl = `https://verbatask-api.mshiraz.com${cleanPath}`;
+    }
+  }
+
+  let res;
+  try {
+    res = await fetch(primaryUrl, { headers });
+    if (!res.ok && res.status >= 500 && fallbackUrl && fallbackUrl !== primaryUrl) {
+      res = await fetch(fallbackUrl, { headers });
+    }
+  } catch (err) {
+    if (fallbackUrl && fallbackUrl !== primaryUrl) {
+      try {
+        res = await fetch(fallbackUrl, { headers });
+      } catch (fallbackErr) {
+        console.error(`[API] Download failed on both primary and fallback:`, fallbackErr);
+        throw new Error('Network error. Failed to download file.', { cause: fallbackErr });
+      }
+    } else {
+      console.error(`[API] Download failed:`, err);
+      throw new Error('Network error. Failed to download file.', { cause: err });
+    }
+  }
+
+  if (!res.ok) {
+    let errText = `Download failed with status ${res.status}`;
+    try {
+      const errJson = await res.json();
+      errText = errJson?.error?.message || errText;
+    } catch (_) {}
+    throw new Error(errText);
+  }
+
+  const blob = await res.blob();
+  const url = window.URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.style.display = 'none';
+  a.href = url;
+  a.download = filename || 'Report.pdf';
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => {
+    window.URL.revokeObjectURL(url);
+    document.body.removeChild(a);
+  }, 100);
+}
+
 export const api = {
   get: (path, options) => request(path, { method: 'GET', ...options }),
   post: (path, body, options) => request(path, { method: 'POST', body, ...options }),
@@ -59,4 +140,6 @@ export const api = {
   patch: (path, body, options) => request(path, { method: 'PATCH', body, ...options }),
   del: (path, options) => request(path, { method: 'DELETE', ...options }),
   delete: (path, options) => request(path, { method: 'DELETE', ...options }),
+  download: downloadFile,
 };
+

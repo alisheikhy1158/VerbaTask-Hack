@@ -22,21 +22,25 @@ const SYSTEM_PROMPT = `You convert a Pakistani merchant's WhatsApp message (whic
 English, Urdu script, or Roman Urdu) for ANY retail trade (general store, grocery/kiryana, medical/pharmacy, clothing/boutique, auto parts, electronics, restaurant/bakery, hardware) into exactly one JSON object — no prose, no markdown fences, JSON only. Pick ONE of these shapes:
 
 1. Logging a sale (customer purchased goods, selling items):
-{"type":"log_sale","items":[{"name":"<item name as the merchant referred to it>","quantity":<number>}],"paymentMethod":"cash"|"easypaisa"|"jazzcash"|"sadapay"|"nayapay"|"raast"|"meezan"|"hbl"|"ubl"|"alfalah"|"mcb"|"faysal"|"allied"|"askari"|"bank","amount":<number or null>,"isIncomplete":<boolean>}
-- Used when items are SOLD (e.g. "2 panadol cash", "1 lawn suit 3500", "3 spark plug jazzcash", "2 chawal cash", "becha", "sold", "furokht", "bechi", "beche", "دیے", "سیل").
+{"type":"log_sale","items":[{"name":"<item name as the merchant referred to it>","quantity":<number>}],"paymentMethod":"cash"|"easypaisa"|"jazzcash"|"sadapay"|"nayapay"|"raast"|"meezan"|"hbl"|"ubl"|"alfalah"|"mcb"|"faysal"|"allied"|"askari"|"bank"|"udhaar","customerName":"<person name or null>","amount":<number or null>,"isIncomplete":<boolean>}
+- Used when items are SOLD (e.g. "2 panadol cash", "1 lawn suit 3500", "3 spark plug udhaar to ali", "2 chawal usman ke khate mein", "becha", "sold", "furokht", "bechi", "beche", "دیے", "سیل").
 - Can contain one or multiple items.
 - Set isIncomplete: true if the message appears cut-off or trailing (e.g. ends with "aur...", "and...", "phir...", trailing numbers, or ellipsis "..."). Otherwise false.
 - If the merchant mentions ANY product name without restock words, it is a sale.
 - If quantity is not explicitly stated, default quantity to 1.
-- Supported payment methods: cash, easypaisa, jazzcash, sadapay, nayapay, raast, meezan, hbl, ubl, alfalah, mcb, faysal, allied, askari, or generic bank. Default to "cash".
+- Supported payment methods: cash, easypaisa, jazzcash, sadapay, nayapay, raast, meezan, hbl, ubl, alfalah, mcb, faysal, allied, askari, bank, or udhaar (khata/credit). Default to "cash".
+- If paymentMethod is "udhaar", extract the customer's name into customerName (e.g. "udhaar ali", "khata osama", "credit for john"). Otherwise null.
 
 2. Updating inventory / Adding incoming stock (restock/delivery):
-{"type":"update_stock","item":{"name":"<item name>","quantity":<number>,"price":<number or null>,"unit":"<unit or null>"},"action":"add"|"set"}
+{"type":"update_stock","items":[{"name":"<item name>","quantity":<number>,"price":<number or null>,"unit":"<unit or null>"}],"action":"add"|"set"}
 - Used when new stock ARRIVES, goods are received, inventory is added, or stock is updated.
+- Supports ONE or MULTIPLE items in a single message (e.g. "maal aya 20 chini 150 aur 10 daal 200").
+- If price is not mentioned, set price to null. Default quantity to 1 if not stated.
 - Common keywords: "maal aya", "aaya", "aayi", "restock", "add stock", "stock update", "added", "delivered", "وصول", "مال آیا", "آئے ہیں", "اسٹاک میں شامل کریں", "نیا مال".
-- Examples: "maal aya 50 panadol 300" -> {"type":"update_stock","item":{"name":"panadol","quantity":50,"price":300},"action":"add"}
-- "add 20 spark plug 450" -> {"type":"update_stock","item":{"name":"spark plug","quantity":20,"price":450},"action":"add"}
-- "20 کلو چاول آئے ہیں" -> {"type":"update_stock","item":{"name":"چاول","quantity":20,"unit":"کلو"},"action":"add"}
+- Examples: "maal aya 50 panadol 300" -> {"type":"update_stock","items":[{"name":"panadol","quantity":50,"price":300}],"action":"add"}
+- "maal aya 20 chini 150 aur 10 daal 200" -> {"type":"update_stock","items":[{"name":"chini","quantity":20,"price":150},{"name":"daal","quantity":10,"price":200}],"action":"add"}
+- "add 20 spark plug 450" -> {"type":"update_stock","items":[{"name":"spark plug","quantity":20,"price":450}],"action":"add"}
+- "20 کلو چاول آئے ہیں" -> {"type":"update_stock","items":[{"name":"چاول","quantity":20,"unit":"کلو"}],"action":"add"}
 
 3. Checking stock of a specific item:
 {"type":"check_stock","item":{"name":"<item name>"}}
@@ -262,57 +266,86 @@ export function parseStockHeuristic(text) {
                     /^add\s+\d+/i.test(lower) ||
                     /^(شامل|اضافہ)\b/.test(lower);
 
-  if (isRestock) {
-    let quantity = 1;
-    let price = null;
-    let unit = null;
+function parseSingleRestockChunk(textChunk) {
+  let quantity = 1;
+  let price = null;
+  let unit = null;
 
-    const unitMatch = lower.match(UNIT_REGEX);
-    if (unitMatch) {
-      unit = unitMatch[1].trim();
-    }
+  const unitMatch = textChunk.match(UNIT_REGEX);
+  if (unitMatch) {
+    unit = unitMatch[1].trim();
+  }
 
-    const explicitPriceMatch = lower.match(/(?:price|rate|rs|rupay|rupees|قیمت|روپے)\s*[:=]?\s*(\d+)/i) ||
-                               lower.match(/(\d+)\s*(?:rs|rupay|rupees|روپے)/i);
-    if (explicitPriceMatch) {
-      price = parseInt(explicitPriceMatch[1], 10);
-    }
+  const explicitPriceMatch = textChunk.match(/(?:price|rate|rs|rupay|rupees|قیمت|روپے)\s*[:=]?\s*(\d+)/i) ||
+                             textChunk.match(/(\d+)\s*(?:rs|rupay|rupees|روپے)/i);
+  if (explicitPriceMatch) {
+    price = parseInt(explicitPriceMatch[1], 10);
+  }
 
-    const nums = lower.match(/\d+/g);
-    if (nums && nums.length > 0) {
-      if (price !== null) {
-        const otherNums = nums.map((n) => parseInt(n, 10)).filter((n) => n !== price);
-        if (otherNums.length > 0) {
-          quantity = otherNums[0];
-        }
-      } else if (nums.length >= 2) {
-        quantity = parseInt(nums[0], 10);
-        price = parseInt(nums[1], 10);
-      } else {
-        quantity = parseInt(nums[0], 10);
+  const nums = textChunk.match(/\d+/g);
+  if (nums && nums.length > 0) {
+    if (price !== null) {
+      const otherNums = nums.map((n) => parseInt(n, 10)).filter((n) => n !== price);
+      if (otherNums.length > 0) {
+        quantity = otherNums[0];
       }
+    } else if (nums.length >= 2) {
+      quantity = parseInt(nums[0], 10);
+      price = parseInt(nums[1], 10);
     } else {
-      // Look for word-based numbers e.g. "bees", "بیس", "panch", "پانچ"
-      const words = lower.split(/\s+/);
-      for (const w of words) {
-        if (NUMBER_WORDS_MAP[w]) {
-          quantity = NUMBER_WORDS_MAP[w];
-          break;
-        }
+      quantity = parseInt(nums[0], 10);
+    }
+  } else {
+    // Look for word-based numbers e.g. "bees", "بیس", "panch", "پانچ"
+    const words = textChunk.split(/\s+/);
+    for (const w of words) {
+      if (NUMBER_WORDS_MAP[w]) {
+        quantity = NUMBER_WORDS_MAP[w];
+        break;
       }
     }
+  }
 
-    const stripped = lower
-      .replace(/(maal\s*a[y|i]a|a[y|i]a\s*hai|aaye\s*hain|restock|add\s*stock|stock\s*update|stock\s*add|add|new|naya|item|مال\s*آیا|آئے\s*ہیں|اسٹاک\s*میں\s*شامل|نیا\s*مال|شامل\s*کرو|شامل|اضافہ|روپے|روپیہ|روپئے|rs|rupay|rupees|roopay|pkr|price|rate|\d+)/gi, ' ')
-      .replace(UNIT_REGEX, ' ')
-      .replace(NUMBER_WORDS_REGEX, ' ')
-      .replace(/\s+/g, ' ')
+  const stripped = textChunk
+    .replace(/(maal\s*a[y|i]a|a[y|i]a\s*hai|aaye\s*hain|restock|add\s*stock|stock\s*update|stock\s*add|add|new|naya|item|مال\s*آیا|آئے\s*ہیں|اسٹاک\s*میں\s*شامل|نیا\s*مال|شامل\s*کرو|شامل|اضافہ|روپے|روپیہ|روپئے|rs|rupay|rupees|roopay|pkr|price|rate|\d+)/gi, ' ')
+    .replace(UNIT_REGEX, ' ')
+    .replace(NUMBER_WORDS_REGEX, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  if (!stripped) return null;
+  return { name: stripped, quantity, price, unit };
+}
+
+  if (isRestock) {
+    // Check for multi-item restock separated by comma, "aur", "and", "اور"
+    const content = lower
+      .replace(/^(?:maal\s*a[y|i]a\s*hai|maal\s*a[y|i]a|restock|add\s*stock|stock\s*update|stock\s*add|add|مال\s*آیا\s*ہے|مال\s*آیا|نیا\s*مال|اسٹاک\s*میں\s*شامل\s*کریں)\s+/i, '')
       .trim();
 
-    if (stripped) {
+    const parts = content.split(/(?:,\s*|\s+aur\s+|\s+and\s+|\s+اور\s+)/i).filter(Boolean);
+    if (parts.length > 1) {
+      const items = [];
+      for (const part of parts) {
+        const itemObj = parseSingleRestockChunk(part);
+        if (itemObj) items.push(itemObj);
+      }
+      if (items.length > 0) {
+        return {
+          type: 'update_stock',
+          item: items[0],
+          items,
+          action: 'add',
+        };
+      }
+    }
+
+    const single = parseSingleRestockChunk(lower);
+    if (single) {
       return {
         type: 'update_stock',
-        item: { name: stripped, quantity, price, unit },
+        item: single,
+        items: [single],
         action: 'add',
       };
     }

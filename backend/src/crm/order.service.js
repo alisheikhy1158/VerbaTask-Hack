@@ -1,5 +1,6 @@
 import InventoryItem from '../models/InventoryItem.js';
 import Order from '../models/Order.js';
+import Customer from '../models/Customer.js';
 import { evaluateThresholdWorkflows } from '../workflows/workflow.service.js';
 import { createApproval, HIGH_VALUE_THRESHOLD } from '../approvals/approval.service.js';
 import { findSimilarInventoryItems } from './item-matching.js';
@@ -164,7 +165,34 @@ export const createOrder = async (command) => {
 
   const effectivePaymentMethod = normalizePaymentMethod(paymentMethod) || (paymentMethod ? String(paymentMethod).toLowerCase().trim() : 'cash');
 
+  let customerId = null;
+  let finalCustomerName = null;
+
+  if (effectivePaymentMethod === 'udhaar' && command.customerName) {
+    const rawName = command.customerName.trim();
+    if (rawName) {
+      finalCustomerName = rawName.toLowerCase();
+      let customer = await Customer.findOne({ merchantId, name: finalCustomerName });
+      if (!customer) {
+        customer = await Customer.create({ merchantId, name: finalCustomerName, balance: 0 });
+      }
+      customer.balance += total;
+      await customer.save();
+      customerId = customer._id;
+      emitDashboardUpdate(merchantId, {
+        type: 'customer',
+        action: 'update',
+        customerId: customer._id,
+        customerName: customer.name,
+        balance: customer.balance,
+      });
+    }
+  }
+
   const orderNumber = `VT-${Date.now().toString().slice(-6)}-${Math.floor(100 + Math.random() * 900)}`;
+
+  const staffName = command.staffName || null;
+  const staffPhone = command.staffPhone || null;
 
   // 5. Construct and save the order
   const order = await Order.create({
@@ -173,8 +201,12 @@ export const createOrder = async (command) => {
     items: orderItems,
     total,
     paymentMethod: effectivePaymentMethod,
+    customerId,
+    customerName: finalCustomerName,
     source,
     status,
+    staffName,
+    staffPhone,
   });
 
   // 6. If pending approval, create the approval record and notify the merchant
@@ -188,7 +220,7 @@ export const createOrder = async (command) => {
   }
 
   // 7. Emit WebSocket event to refresh dashboard
-  emitDashboardUpdate(merchantId, { type: 'order', orderId: order._id, total, status });
+  emitDashboardUpdate(merchantId, { type: 'order', orderId: order._id, total, status, staffName, staffPhone });
 
   return order;
 };
